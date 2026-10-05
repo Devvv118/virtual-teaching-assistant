@@ -1,7 +1,10 @@
+httpx
+datetime
+filetype
 fastapi
-uvicorn[standard]
+pydantic
 python-dotenv
 requests
 typesense
 numpy
-pydantic
+uvicorn

@@ -1,23 +1,28 @@
-from fastapi import FastAPI
-from pydantic import BaseModel
-import typesense
-from typing import List, Optional
-import requests
 import os
-from dotenv import load_dotenv
-from fastapi.middleware.cors import CORSMiddleware
-import base64
-import numpy as np
 import re
+import httpx
 import base64
-import imghdr
-import os
+import filetype
+import requests
+import typesense
+import numpy as np
+from fastapi import FastAPI
+from pydantic import BaseModel, Field
+from dotenv import load_dotenv
+from typing import List, Optional
+from fastapi import HTTPException
+from datetime import date, timedelta
+from fastapi.middleware.cors import CORSMiddleware
 
 load_dotenv()
 
-api_key = os.getenv("AIPROXY_TOKEN")
+DAILY_LIMIT = 10
+MAX_QUESTION_LENGTH = 20_000
+MAX_IMAGE_SIZE = 20 * 1024 * 1024
+
+api_key = os.getenv("AIPIPE_TOKEN")
 typesense_api_key = os.getenv("TYPESENSE_ADMIN_KEY")
-typesense_host = "9crqf8ga1kxbhvtdp-1.a1.typesense.net"
+typesense_host = os.getenv("TYPESENSE_HOST")
 
 typesense_client = typesense.Client({
     "nodes": [{
@@ -26,7 +31,7 @@ typesense_client = typesense.Client({
         "protocol": "https"
     }],
     "api_key": typesense_api_key,
-    "connection_timeout_seconds": 2
+    "connection_timeout_seconds": 10
 })
 
 app = FastAPI()
@@ -39,12 +44,62 @@ app.add_middleware(
 )
 
 class QueryRequest(BaseModel):
-    question: str
+    question: str = Field(..., max_length=MAX_QUESTION_LENGTH)
     image: Optional[str] = None
     link: Optional[str] = None
 
+def validate_image_size(image_base64: str):
+    # Approximate decoded size
+    size = len(image_base64) * 3 // 4
+
+    if size > MAX_IMAGE_SIZE:
+        raise HTTPException(
+            status_code=413,
+            detail="Image is too large. Maximum size is 20 MB."
+        )
+
+async def daily_budget_exceeded() -> bool:
+    token = os.getenv("AIPIPE_TOKEN")
+
+    if not token:
+        return True
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                "https://aipipe.org/usage",
+                headers={
+                    "Authorization": f"Bearer {token}"
+                }
+            )
+
+            response.raise_for_status()
+            data = response.json()
+
+            today = date.today()
+            yesterday = today - timedelta(days=1)
+
+            today = today.isoformat()
+            yesterday = yesterday.isoformat()
+
+            today_cost = next(
+                (
+                    item["cost"]
+                    for item in data.get("usage", [])
+                    if item.get("date") == today
+                ),
+                0.0
+            )
+
+            print(f"today_cost: {today_cost}")
+            return today_cost >= DAILY_LIMIT
+
+    except Exception as e:
+        print(f"Error checking daily budget: {e}")
+        return True
+
 def get_embedding(text: str) -> List:
-    url = "https://aiproxy.sanand.workers.dev/openai/v1/embeddings"
+    url = "https://aipipe.org/openai/v1/embeddings"
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
@@ -85,6 +140,11 @@ def search_typesense_with_vector(embedding: list, k=2) -> list:
                 }
             ]
         })
+
+        if "error" in results:
+            print(f"Typesense error in {collection}:")
+            print(result["error"])
+            continue
 
         hits = results["results"][0]["hits"]
         for hit in hits:
@@ -188,19 +248,21 @@ def fetch_surrounding_context(matches: list, link: str = "", window: int = 2) ->
     return matches
 
 def get_image_mimetype(base64_string):
-    # Decode base64 string
     image_data = base64.b64decode(base64_string)
 
-    # Option 1: imghdr (basic)
-    img_type = imghdr.what(None, h=image_data)  # e.g., 'jpeg', 'png', 'webp'
-    mime_type = f'image/{img_type}' if img_type else 'application/octet-stream'
+    kind = filetype.guess(image_data)
+
+    if kind is None:
+        return "application/octet-stream"
+
+    return kind.mime
     
     return mime_type # eg. image/webp
 
 def ask_gpt(query: str, matches: list, image_input: str = None) -> str:
     context_str = "\n".join([m["content"] for m in matches])
 
-    url = "http://aiproxy.sanand.workers.dev/openai/v1/chat/completions"
+    url = "https://aipipe.org/openai/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -244,6 +306,16 @@ async def default():
 
 @app.post("/api")
 async def handle_query(payload: QueryRequest):
+
+    if payload.image:
+        validate_image_size(payload.image)
+
+    if await daily_budget_exceeded():
+        raise HTTPException(
+            status_code=429,
+            detail="API usage limit reached for today. Please try again tomorrow."
+        )
+
     embedding = get_embedding(payload.question)
     if(payload.link):
         matches = search_typesense_with_link(payload.link,embedding)

@@ -5,9 +5,9 @@ import typesense
 from dotenv import load_dotenv
 
 load_dotenv()
-api_key = os.getenv("AIPROXY_TOKEN")
+api_key = os.getenv("AIPIPE_TOKEN")
 typesense_api_key = os.getenv("TYPESENSE_ADMIN_KEY")
-typesense_host = "9crqf8ga1kxbhvtdp-1.a1.typesense.net"
+typesense_host = os.getenv("TYPESENSE_HOST")
 
 typesense_client = typesense.Client({
     "nodes": [{
@@ -16,7 +16,7 @@ typesense_client = typesense.Client({
         "protocol": "https"
     }],
     "api_key": typesense_api_key,
-    "connection_timeout_seconds": 2
+    "connection_timeout_seconds": 10
 })
 
 typesense_client.collections['discourse-book'].delete()
@@ -63,7 +63,7 @@ with open("discourse-data.jsonl", "r", encoding="utf-8") as f:
             texts = [item["content"] for item in buffer]
 
             response = requests.post(
-                "https://aiproxy.sanand.workers.dev/openai/v1/embeddings",
+                "https://aipipe.org/openai/v1/embeddings",
                 headers={
                     "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json"
@@ -96,7 +96,7 @@ with open("discourse-data.jsonl", "r", encoding="utf-8") as f:
 if buffer:
     texts = [item["content"] for item in buffer]
     response = requests.post(
-        "https://aiproxy.sanand.workers.dev/openai/v1/embeddings",
+        "https://aipipe.org/openai/v1/embeddings",
         headers={
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
