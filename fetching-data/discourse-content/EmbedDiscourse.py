@@ -1,46 +1,88 @@
 import json
 import os
+import psycopg
 import requests
-import typesense
+
 from dotenv import load_dotenv
+from pgvector.psycopg import register_vector
 
 load_dotenv()
+
 api_key = os.getenv("AIPIPE_TOKEN")
-typesense_api_key = os.getenv("TYPESENSE_ADMIN_KEY")
-typesense_host = os.getenv("TYPESENSE_HOST")
+database_url = os.getenv("DATABASE_URL")
 
-typesense_client = typesense.Client({
-    "nodes": [{
-        "host": typesense_host,
-        "port": "443",
-        "protocol": "https"
-    }],
-    "api_key": typesense_api_key,
-    "connection_timeout_seconds": 10
-})
+conn = psycopg.connect(database_url)
 
-typesense_client.collections['discourse-book'].delete()
+conn.execute("""
+    CREATE EXTENSION IF NOT EXISTS vector;
+""")
 
-try:
-    typesense_client.collections.create({
-      "name": "discourse-book",
-      "fields": [
-          {"name": "id", "type": "string"},
-          {"name": "url", "type": "string", "filter": True},
-          {"name": "parent_url", "type": "string", "filter": True},
-          {"name": "content", "type": "string"},
-          {"name": "embedding", "type": "float[]", "num_dim": 1536}
-      ],
-  })
+register_vector(conn)
 
-except Exception as e:
-    print("Collection exists or error:", e)
+conn.execute("""
+    DROP TABLE IF EXISTS discourse_book;
+""")
+
+conn.execute("""
+    CREATE TABLE IF NOT EXISTS discourse_book (
+        id TEXT PRIMARY KEY,
+        url TEXT NOT NULL,
+        parent_url TEXT,
+        content TEXT NOT NULL,
+        embedding VECTOR(1536) NOT NULL
+    );
+""")
+
+conn.commit()
 
 
 BATCH_SIZE = 10
 buffer = []
 count = 0
-    
+
+
+def process_buffer(buffer):
+    texts = [item["content"] for item in buffer]
+
+    response = requests.post(
+        "https://aipipe.org/openai/v1/embeddings",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        },
+        json={
+            "model": "text-embedding-3-small",
+            "input": texts
+        }
+    )
+    response.raise_for_status()
+    embeddings = [d["embedding"] for d in response.json()["data"]]
+
+    for i, doc in enumerate(buffer):
+        try:
+            conn.execute("""
+                    INSERT INTO discourse_book (id,url,parent_url,content,embedding)
+                    VALUES (%s,%s,%s,%s,%s)
+                    ON CONFLICT (id)
+                    DO UPDATE SET
+                        url = EXCLUDED.url,
+                        parent_url = EXCLUDED.parent_url,
+                        content = EXCLUDED.content,
+                        embedding = EXCLUDED.embedding
+                """, (
+                    doc["id"],
+                    doc["url"],
+                    doc["parent_url"],
+                    doc["content"],
+                    embeddings[i],
+                ))
+
+        except Exception as e:
+            print(f"Error inserting document: {e}")
+
+    conn.commit()
+
+
 with open("discourse-data.jsonl", "r", encoding="utf-8") as f:
     for line in f:
         data = json.loads(line)
@@ -60,33 +102,7 @@ with open("discourse-data.jsonl", "r", encoding="utf-8") as f:
         })
 
         if len(buffer) == BATCH_SIZE:
-            texts = [item["content"] for item in buffer]
-
-            response = requests.post(
-                "https://aipipe.org/openai/v1/embeddings",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json"
-                },
-                json={
-                    "model": "text-embedding-3-small",
-                    "input": texts
-                }
-            )
-            response.raise_for_status()
-            embeddings = [d["embedding"] for d in response.json()["data"]]
-
-            for i, doc in enumerate(buffer):
-                try:
-                    typesense_client.collections["discourse-book"].documents.upsert({
-                        "id": doc["id"],
-                        "url": doc["url"],
-                        "parent_url": doc["parent_url"],
-                        "content": doc["content"],
-                        "embedding": embeddings[i],
-                    })
-                except Exception as e:
-                    print(f"Error inserting document: {e}")
+            process_buffer(buffer)
 
             count+=BATCH_SIZE
             print(count)
@@ -94,29 +110,9 @@ with open("discourse-data.jsonl", "r", encoding="utf-8") as f:
             buffer = []
 
 if buffer:
-    texts = [item["content"] for item in buffer]
-    response = requests.post(
-        "https://aipipe.org/openai/v1/embeddings",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
-        },
-        json={
-            "model": "text-embedding-3-small",
-            "input": texts
-        }
-    )
-    response.raise_for_status()
-    embeddings = [d["embedding"] for d in response.json()["data"]]
+    process_buffer(buffer)
 
-    for i, doc in enumerate(buffer):
-        try:
-            typesense_client.collections["discourse-book"].documents.upsert({
-                "id": doc["id"],
-                "url": doc["url"],
-                "parent_url": doc["parent_url"],
-                "content": doc["content"],
-                "embedding": embeddings[i],
-            })
-        except Exception as e:
-            print(f"Error inserting document: {e}")
+    count+=len(buffer)
+    print(count)
+
+conn.close()

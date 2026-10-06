@@ -2,18 +2,16 @@ import os
 import re
 import httpx
 import base64
-import psycopg
 import filetype
 import requests
-
-from datetime import date
+import typesense
+import numpy as np
 from fastapi import FastAPI
-from pgvector import Vector
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from typing import List, Optional
 from fastapi import HTTPException
-from pgvector.psycopg import register_vector
+from datetime import date, timedelta
 from fastapi.middleware.cors import CORSMiddleware
 
 load_dotenv()
@@ -23,16 +21,18 @@ MAX_QUESTION_LENGTH = 20_000
 MAX_IMAGE_SIZE = 20 * 1024 * 1024
 
 api_key = os.getenv("AIPIPE_TOKEN")
-database_url = os.getenv("DATABASE_URL")
+typesense_api_key = os.getenv("TYPESENSE_ADMIN_KEY")
+typesense_host = os.getenv("TYPESENSE_HOST")
 
-conn = psycopg.connect(database_url, autocommit=True)
-
-register_vector(conn)
-
-TABLES = {
-    "discourse": "discourse_book",
-    "course": "course_content_book",
-}
+typesense_client = typesense.Client({
+    "nodes": [{
+        "host": typesense_host,
+        "port": "443",
+        "protocol": "https"
+    }],
+    "api_key": typesense_api_key,
+    "connection_timeout_seconds": 10
+})
 
 app = FastAPI()
 
@@ -111,136 +111,98 @@ def get_embedding(text: str) -> List:
 
     return response.json()['data'][0]['embedding']
 
-def search_postgres_with_vector(embedding: list, k=2) -> list:
+def cosine_sim(vec1: List[float], vec2: List[float]) -> float:
+    a = np.array(vec1)
+    b = np.array(vec2)
+    norm_a = np.linalg.norm(a)
+    norm_b = np.linalg.norm(b)
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return np.dot(a, b) / (norm_a * norm_b)
 
-    query_vector = Vector(embedding)
+def search_typesense_with_vector(embedding: list, k=2) -> list:
+    query_vector = ",".join(map(str, embedding))
 
+    collections = ["discourse-book", "course-content-book"]
     all_hits = []
 
-    # Discourse
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT url, parent_url, content, embedding <=> %s AS distance
-                FROM discourse_book
-                ORDER BY embedding <=> %s
-                LIMIT %s
-                """,
-                 (query_vector, query_vector, k)
-            )
+    for collection in collections:
+        results = typesense_client.multi_search.perform({
+            "searches": [
+                {
+                    "collection": collection,
+                    "q": "placeholder",
+                    "query_by": "content",
+                    "vector_query": f"embedding:([{query_vector}], k:{k})"
+                }
+            ]
+        })
 
-            for url, parent_url, content, distance in cur.fetchall():
+        if "error" in results:
+            print(f"Typesense error in {collection}:")
+            print(result["error"])
+            continue
+
+        hits = results["results"][0]["hits"]
+        for hit in hits:
+            doc = hit["document"]
+            doc_embedding = doc.get("embedding")
+            if doc_embedding:
+                sim = cosine_sim(embedding, doc_embedding)
                 all_hits.append({
-                    "url": url,
-                    "parent_url": parent_url,
-                    "content": content,
-                    "similarity": 1 - distance
+                    "url": doc.get("url"),
+                    "parent_url": doc["parent_url"] if collection=="discourse-book" else None,
+                    "content": doc["content"],
+                    "similarity": sim
                 })
 
-    except Exception as e:
-        print(f"PostgreSQL error in discourse_book:")
-        print(e)
+    sorted_hits = sorted(all_hits, key=lambda x: x["similarity"], reverse=True)
+    return sorted_hits[:k]
 
-    # Course content
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT url, content, embedding <=> %s AS distance 
-                FROM course_content_book
-                ORDER BY embedding <=> %s
-                LIMIT %s
-                """,
-                 (query_vector, query_vector, k)
-            )
-
-            for url, content, distance in cur.fetchall():
-                all_hits.append({
-                    "url": url,
-                    "parent_url": None,
-                    "content": content,
-                    "similarity": 1 - distance
-                })
-
-    except Exception as e:
-        print(f"PostgreSQL error in course_content_book:")
-        print(e)
-
-    all_hits.sort(
-        key=lambda x: x["similarity"],
-        reverse=True
-    )
-
-    return all_hits[:k]
-
-def search_postgres_with_link(link: str, query_embedding: list) -> list:
-
-    query_vector = Vector(query_embedding)
+def search_typesense_with_link(link: str, query_embedding: list) -> list:
+    all_hits = []
+    search_config = None
 
     if link.startswith("https://tds.s-anand.net/#/"):
-        table = TABLES["course"]
-
-        query = f"""
-            SELECT url, parent_url, content, embedding <=> %s AS distance
-            FROM {table}
-            WHERE url = %s
-              AND embedding IS NOT NULL
-            ORDER BY embedding <=> %s
-            LIMIT 2
-        """
-
-        params = (
-            query_vector,
-            link,
-            query_vector,
-        )
+        collection = "course-content-book"
+        search_config = {
+            "q": "*",
+            "query_by": "content",
+            "filter_by": f"url:={link}"
+        }
 
     elif link.startswith("https://discourse.onlinedegree.iitm.ac.in/t/"):
-        table = TABLES["discourse"]
-
-        query = f"""
-            SELECT url, parent_url, content, embedding <=> %s AS distance
-            FROM {table}
-            WHERE (url = %s OR parent_url = %s)
-              AND embedding IS NOT NULL
-            ORDER BY embedding <=> %s
-            LIMIT 2
-        """
-
-        params = (
-            query_vector,
-            link,
-            link,
-            query_vector,
-        )
+        collection = "discourse-book"
+        search_config = {
+            "q": "*",
+            "query_by": "content",
+            "filter_by": f"url:={link} || parent_url:={link}"
+        }
 
     else:
         return [{"error": "link not supported"}]
 
     try:
-        with conn.cursor() as cur:
-            cur.execute(query, params)
+        result = typesense_client.collections[collection].documents.search(search_config)
 
-            rows = cur.fetchall()
+        for hit in result.get("hits", []):
+            doc = hit.get("document", {})
+            doc_embedding = doc.get("embedding")
 
-            results = []
-
-            for url, parent_url, content, distance in rows:
-                similarity = 1 - distance
-
-                results.append({
-                    "url": url,
-                    "parent_url": parent_url if table == TABLES["discourse"] else None,
-                    "content": content,
-                    "similarity": similarity
+            if doc_embedding:
+                sim = cosine_sim(query_embedding, doc_embedding)
+                all_hits.append({
+                    "url": doc.get("url"),
+                    "parent_url": doc.get("parent_url") if collection=="discourse-book" else None,
+                    "content": doc.get("content"),
+                    "similarity": sim
                 })
 
-            return results
-
     except Exception as e:
-        print(f"Error searching link in {table}: {e}")
+        print(f"Error searching link in {collection}: {e}")
         return [{"error": str(e)}]
+
+    return sorted(all_hits, key=lambda x: x["similarity"], reverse=True)[:2]
 
 def fetch_surrounding_context(matches: list, link: str = "", window: int = 2) -> list:
     
@@ -263,26 +225,20 @@ def fetch_surrounding_context(matches: list, link: str = "", window: int = 2) ->
                 new_url = f"{discourse_prefix}{slug}/{topic_id}/{new_post_id}"
 
                 try:
-                    with conn.cursor() as cur:
-                        cur.execute(
-                            """
-                            SELECT url, parent_url, content
-                            FROM discourse_book
-                            WHERE url = %s
-                            LIMIT 1
-                            """,
-                            (new_url,)
-                        )
+                    result = typesense_client.collections["discourse-book"].documents.search({
+                        "q": "*",
+                        "query_by": "content",
+                        "filter_by": f"url:={new_url}"
+                    })
+                    for hit in result.get("hits", []):
+                        doc = hit["document"]
 
-                        row = cur.fetchone()
-
-                        if row:
+                        if doc.get("url") == new_url:
                             matches.append({
-                                "url": row[0],
-                                "parent_url": row[1],
-                                "content": row[2]
+                                "url": doc["url"],
+                                "parent_url": doc["parent_url"],
+                                "content": doc["content"]
                             })
-
                 except Exception as e:
                     print(f"Could not fetch {new_url}: {e}")
 
@@ -297,6 +253,8 @@ def get_image_mimetype(base64_string):
         return "application/octet-stream"
 
     return kind.mime
+    
+    return mime_type # eg. image/webp
 
 def ask_gpt(query: str, matches: list, image_input: str = None) -> str:
     context_str = "\n".join([m["content"] for m in matches])
@@ -357,10 +315,10 @@ async def handle_query(payload: QueryRequest):
 
     embedding = get_embedding(payload.question)
     if(payload.link):
-        matches = search_postgres_with_link(payload.link,embedding)
+        matches = search_typesense_with_link(payload.link,embedding)
         more_matches = fetch_surrounding_context(matches,payload.link)
     else:
-        matches = search_postgres_with_vector(embedding)
+        matches = search_typesense_with_vector(embedding)
         more_matches = fetch_surrounding_context(matches)
     
     gpt_answer = ask_gpt(payload.question, more_matches, payload.image)

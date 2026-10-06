@@ -5,6 +5,10 @@ fastapi
 pydantic
 python-dotenv
 requests
+uvicorn
+
+psycopg
+pgvector
+
 typesense
 numpy
-uvicorn
