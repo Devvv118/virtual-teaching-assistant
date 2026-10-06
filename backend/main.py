@@ -1,13 +1,21 @@
 import os
 import re
+import sys
+import json
+import time
+import uuid
 import httpx
 import base64
 import psycopg
 import filetype
 import requests
+import uvicorn
+import traceback
 
 from datetime import date
 from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
+from starlette.concurrency import run_in_threadpool
 from pgvector import Vector
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
@@ -16,7 +24,18 @@ from fastapi import HTTPException
 from pgvector.psycopg import register_vector
 from fastapi.middleware.cors import CORSMiddleware
 
+START_TIME = time.time()
+BOOT_LOG = []   # replayed by the frontend terminal via GET /boot
+
+def boot(msg: str, level: str = "info"):
+    # Print to the server console AND remember it for the frontend terminal.
+    BOOT_LOG.append({"t": round(time.time() - START_TIME, 3), "level": level, "msg": msg})
+    print(f"[boot {time.strftime('%H:%M:%S')}] {msg}", flush=True)
+
+boot(f"virtual-teaching-assistant starting · python {sys.version.split()[0]}")
+
 load_dotenv()
+boot("environment loaded (.env)", "ok")
 
 DAILY_LIMIT = 10
 MAX_QUESTION_LENGTH = 20_000
@@ -25,16 +44,37 @@ MAX_IMAGE_SIZE = 20 * 1024 * 1024
 api_key = os.getenv("AIPIPE_TOKEN")
 database_url = os.getenv("DATABASE_URL")
 
-conn = psycopg.connect(database_url, autocommit=True)
+if api_key:
+    print(f"[boot {time.strftime('%H:%M:%S')}] AIPIPE_TOKEN found", flush=True)  # console only
+else:
+    boot("AIPIPE_TOKEN missing - every request will be refused", "warn")
+
+boot("connecting to PostgreSQL ...")
+try:
+    conn = psycopg.connect(database_url, autocommit=True)
+except Exception as e:
+    boot(f"database connection failed: {type(e).__name__}", "error")
+    raise
+boot("connected to database", "ok")
 
 register_vector(conn)
+boot("pgvector registered on connection", "ok")
 
 TABLES = {
     "discourse": "discourse_book",
     "course": "course_content_book",
 }
 
+for _table in TABLES.values():
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) FROM {_table}")
+            boot(f"table {_table}: {cur.fetchone()[0]:,} chunks indexed", "ok")
+    except Exception as e:
+        boot(f"table {_table}: unavailable ({type(e).__name__})", "warn")
+
 app = FastAPI()
+boot("FastAPI app created", "ok")
 
 app.add_middleware(
     CORSMiddleware,
@@ -42,6 +82,10 @@ app.add_middleware(
     allow_methods=["OPTIONS", "POST", "GET"],
     allow_headers=["*"],
 )
+boot("CORS middleware enabled", "ok")
+
+COURSE_LINK_PREFIX = "https://tds.s-anand.net/#/"
+DISCOURSE_LINK_PREFIX = "https://discourse.onlinedegree.iitm.ac.in/t/"
 
 class QueryRequest(BaseModel):
     question: str = Field(..., max_length=MAX_QUESTION_LENGTH)
@@ -343,29 +387,149 @@ def ask_gpt(query: str, matches: list, image_input: str = None) -> str:
 async def default():
     return {"message": "server is running"}
 
+@app.get("/boot")
+async def boot_status():
+    # Startup messages + a live database ping, for the frontend terminal.
+    def ping():
+        start = time.time()
+        conn.execute("SELECT 1")
+        return round((time.time() - start) * 1000, 1)
+
+    try:
+        db = {"ok": True, "ms": await run_in_threadpool(ping)}
+    except Exception as e:
+        print(f"[boot] database ping failed: {e}", flush=True)
+        db = {"ok": False, "ms": None}
+
+    return {
+        "boot": BOOT_LOG,
+        "db": db,
+        "uptime": round(time.time() - START_TIME, 1),
+    }
+
+def _short_url(url: str, width: int = 78) -> str:
+    return url if len(url) <= width else url[: width - 1] + "…"
+
+def _source_of(match: dict) -> str:
+    return "discourse" if (match.get("url") or "").startswith(DISCOURSE_LINK_PREFIX) else "course"
+
+async def run_pipeline(payload: QueryRequest):
+    """
+    The whole question -> answer flow as an async generator of events:
+      {"type": "log",    "t": seconds, "level": info|ok|warn|hit, "msg": str}
+      {"type": "result", "t": seconds, "answer": str, "links": [...]}
+      {"type": "error",  "t": seconds, "status": int, "msg": str}
+    Each event is also printed to the server console.
+    """
+    rid = uuid.uuid4().hex[:6]
+    t0 = time.time()
+
+    def ev(level: str, msg: str) -> dict:
+        print(f"[req {rid}] {msg}", flush=True)
+        return {"type": "log", "t": round(time.time() - t0, 3), "level": level, "msg": msg}
+
+    def err(status: int, msg: str) -> dict:
+        print(f"[req {rid}] ERROR {status}: {msg}", flush=True)
+        return {"type": "error", "t": round(time.time() - t0, 3), "status": status, "msg": msg}
+
+    link = (payload.link or "").strip()
+
+    try:
+        yield ev("info", f"request {rid} received - question {len(payload.question)} chars, "
+                         f"link {'provided' if link else 'none'}")
+
+        if payload.image:
+            validate_image_size(payload.image)
+            yield ev("info", "image attached, size ok")
+
+        yield ev("info", "checking daily API budget ...")
+        if await daily_budget_exceeded():
+            yield err(429, "API usage limit reached for today. Please try again tomorrow.")
+            return
+        yield ev("ok", "budget ok")
+
+        yield ev("info", "embedding question with text-embedding-3-small ...")
+        started = time.time()
+        embedding = await run_in_threadpool(get_embedding, payload.question)
+        yield ev("ok", f"embedding ready - {len(embedding)} dims in {time.time() - started:.2f}s")
+
+        if link:
+            if link.startswith(COURSE_LINK_PREFIX):
+                yield ev("info", "link is a course page - searching course_content_book for that page ...")
+            elif link.startswith(DISCOURSE_LINK_PREFIX):
+                yield ev("info", "link is a discourse thread - searching discourse_book for that thread ...")
+            else:
+                yield err(400, "link not supported - use a tds.s-anand.net page "
+                               "or a discourse.onlinedegree.iitm.ac.in/t/ thread")
+                return
+            started = time.time()
+            matches = await run_in_threadpool(search_postgres_with_link, link, embedding)
+            if matches and "error" in matches[0]:
+                yield err(500, "database search failed - see the server logs")
+                return
+            if not matches:
+                yield ev("warn", "no chunks found for that link - answering without context")
+        else:
+            yield ev("info", "no link - vector search across discourse_book + course_content_book (cosine, k=2) ...")
+            started = time.time()
+            matches = await run_in_threadpool(search_postgres_with_vector, embedding)
+
+        yield ev("ok", f"{len(matches)} match(es) in {time.time() - started:.2f}s")
+        for i, m in enumerate(matches, 1):
+            yield ev("hit", f"#{i}  sim {m['similarity']:.3f}  {_source_of(m):<9}  {_short_url(m['url'])}")
+
+        yield ev("info", "fetching surrounding discourse posts (+-2) ...")
+        found = len(matches)
+        more_matches = await run_in_threadpool(fetch_surrounding_context, matches, link)
+        yield ev("ok", f"+{len(more_matches) - found} neighbouring post(s), context is {len(more_matches)} chunk(s)")
+
+        context_chars = sum(len(m["content"]) for m in more_matches)
+        yield ev("info", f"asking gpt-4o-mini - {context_chars:,} chars of context"
+                         f"{' + image' if payload.image else ''} ...")
+        started = time.time()
+        gpt_answer = await run_in_threadpool(ask_gpt, payload.question, more_matches, payload.image)
+        yield ev("ok", f"answer received - {len(gpt_answer['content'])} chars in {time.time() - started:.2f}s")
+
+        links = [{"url": x["parent_url"] if x["parent_url"] else x["url"], "text": x["content"]} for x in more_matches[:3]]
+
+        yield ev("ok", f"done in {time.time() - t0:.2f}s")
+        yield {"type": "result", "t": round(time.time() - t0, 3),
+               "answer": gpt_answer["content"], "links": links}
+
+    except HTTPException as e:
+        yield err(e.status_code, str(e.detail))
+    except requests.HTTPError as e:
+        traceback.print_exc()
+        code = getattr(e.response, "status_code", "?")
+        yield err(502, f"upstream API error ({code})")
+    except Exception:
+        traceback.print_exc()
+        yield err(500, "internal error - see the server logs")
+
 @app.post("/api")
 async def handle_query(payload: QueryRequest):
 
-    if payload.image:
-        validate_image_size(payload.image)
+    async for event in run_pipeline(payload):
+        if event["type"] == "error":
+            raise HTTPException(status_code=event["status"], detail=event["msg"])
+        if event["type"] == "result":
+            return {"answer": event["answer"],
+                    "links": event["links"]}
 
-    if await daily_budget_exceeded():
-        raise HTTPException(
-            status_code=429,
-            detail="API usage limit reached for today. Please try again tomorrow."
-        )
+@app.post("/api/stream")
+async def handle_query_stream(payload: QueryRequest):
+    # Same pipeline as /api, but every step is sent as it happens (one JSON object per line).
+    async def lines():
+        async for event in run_pipeline(payload):
+            yield json.dumps(event) + "\n"
 
-    embedding = get_embedding(payload.question)
-    if(payload.link):
-        matches = search_postgres_with_link(payload.link,embedding)
-        more_matches = fetch_surrounding_context(matches,payload.link)
-    else:
-        matches = search_postgres_with_vector(embedding)
-        more_matches = fetch_surrounding_context(matches)
-    
-    gpt_answer = ask_gpt(payload.question, more_matches, payload.image)
+    return StreamingResponse(
+        lines(),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
-    links = [{"url":x["parent_url"] if x["parent_url"] else x["url"] , "text":x["content"]} for x in more_matches[:3]]
+boot("ready - waiting for questions", "ok")
 
-    return {"answer": gpt_answer["content"], 
-            "links": links}
+if __name__ == "__main__":
+    uvicorn.run(app, host=os.getenv("HOST", "0.0.0.0"), port=int(os.getenv("PORT", "8000")))
