@@ -390,26 +390,6 @@ def ask_gpt(query: str, matches: list, image_input: str = None) -> str:
 async def default():
     return {"message": "server is running"}
 
-@app.get("/boot")
-async def boot_status():
-    # Startup messages + a live database ping, for the frontend terminal.
-    def ping():
-        start = time.time()
-        conn.execute("SELECT 1")
-        return round((time.time() - start) * 1000, 1)
-
-    try:
-        db = {"ok": True, "ms": await run_in_threadpool(ping)}
-    except Exception as e:
-        print(f"[boot] database ping failed: {e}", flush=True)
-        db = {"ok": False, "ms": None}
-
-    return {
-        "boot": BOOT_LOG,
-        "db": db,
-        "uptime": round(time.time() - START_TIME, 1),
-    }
-
 def _short_url(url: str, width: int = 78) -> str:
     return url if len(url) <= width else url[: width - 1] + "…"
 
