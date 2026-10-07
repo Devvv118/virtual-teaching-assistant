@@ -80,7 +80,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
     # "http://localhost:5173",
-    "https://your-app.vercel.app",
+    "https://virtual-teaching-assistant-pink.vercel.app",
     ],
     allow_methods=["OPTIONS", "POST", "GET"],
     allow_headers=["*"],
