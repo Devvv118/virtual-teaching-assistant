@@ -50,12 +50,9 @@ export default function RunBlock({ run }) {
 
       {status === "done" && (
         <>
-          <div
-            ref={answerRef}
-            className="line-in mt-8 scroll-mt-6 rounded-xl border border-gold/30 border-l-4 border-l-gold bg-gold/[0.07] p-5 shadow-[0_0_40px_-12px_rgba(193,154,91,0.35)] md:p-7"
-          >
+          <div ref={answerRef} className="line-in mt-8 scroll-mt-6">
             <h2 className="font-warm-display text-[11px] tracking-[0.18em] text-gold uppercase">Answer</h2>
-            <div className="-mt-1 [&_p]:text-[14px] [&_p]:text-cream/90 [&_li]:text-[14px] [&_li]:text-cream/90">
+            <div className="[&_p]:text-[14px] [&_p]:text-cream [&_li]:text-[14px] [&_li]:text-cream">
               <Markdown source={answer} />
             </div>
           </div>
