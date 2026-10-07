@@ -1,8 +1,11 @@
 import { useEffect, useState } from "react";
-import { API_URL, fetchBoot } from "../lib/api";
+import { API_URL, pingServer } from "../lib/api";
 
-// Replays the startup messages main.py recorded, then adds a live DB ping.
+// Waits for the backend (e.g. a Render cold start) to answer, giving up after a minute.
 // status: "connecting" | "ready" | "offline"
+const TIMEOUT_MS = 60_000;
+const RETRY_MS = 3_000;
+
 export default function useBoot() {
   const [lines, setLines] = useState([]);
   const [status, setStatus] = useState("connecting");
@@ -10,37 +13,35 @@ export default function useBoot() {
 
   useEffect(() => {
     const ctrl = new AbortController();
-    const timers = [];
+    let timer;
     const push = (l) => setLines((ls) => [...ls, l]);
-    const later = (fn, ms) => timers.push(setTimeout(fn, ms));
+    const start = Date.now();
 
     setLines([]);
     setStatus("connecting");
     push({ scope: "client", level: "info", msg: `connecting to ${API_URL} ...` });
+    push({ scope: "client", level: "info", msg: "waiting for the server to start (up to 60s) ..." });
 
-    fetchBoot(ctrl.signal)
-      .then((data) => {
-        const STEP = 110;
-        data.boot.forEach((b, i) => later(() => push({ ...b, scope: "server" }), STEP * (i + 1)));
-        later(() => {
-          if (data.db.ok) push({ scope: "client", level: "ok", msg: `live database ping ok - ${data.db.ms} ms` });
-          else push({ scope: "client", level: "error", msg: "live database ping failed" });
-        }, STEP * (data.boot.length + 1));
-        later(() => {
-          push({ scope: "client", level: data.db.ok ? "ok" : "warn", msg: `api ready - up ${data.uptime}s` });
-          setStatus(data.db.ok ? "ready" : "offline");
-        }, STEP * (data.boot.length + 2));
-      })
-      .catch((e) => {
+    const tryConnect = async () => {
+      try {
+        await pingServer(ctrl.signal);
+        push({ scope: "client", level: "ok", msg: "api ready" });
+        setStatus("ready");
+      } catch (e) {
         if (e.name === "AbortError") return;
-        push({ scope: "client", level: "error", msg: `cannot reach the API (${e.message})` });
-        push({ scope: "client", level: "warn", msg: "is the backend running?  ->  cd backend && python main.py" });
-        setStatus("offline");
-      });
+        if (Date.now() - start >= TIMEOUT_MS) {
+          push({ scope: "client", level: "error", msg: "connection timed out after 60s" });
+          setStatus("offline");
+        } else {
+          timer = setTimeout(tryConnect, RETRY_MS);
+        }
+      }
+    };
+    tryConnect();
 
     return () => {
       ctrl.abort();
-      timers.forEach(clearTimeout);
+      clearTimeout(timer);
     };
   }, [attempt]);
 

@@ -25,7 +25,7 @@ from pgvector.psycopg import register_vector
 from fastapi.middleware.cors import CORSMiddleware
 
 START_TIME = time.time()
-BOOT_LOG = []   # replayed by the frontend terminal via GET /boot
+BOOT_LOG = []
 
 def boot(msg: str, level: str = "info"):
     # Print to the server console AND remember it for the frontend terminal.

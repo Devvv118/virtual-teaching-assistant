@@ -7,10 +7,9 @@ export const LINK_PREFIXES = [
 ];
 export const isSupportedLink = (l) => LINK_PREFIXES.some((p) => l.startsWith(p));
 
-export async function fetchBoot(signal) {
-  const res = await fetch(`${API_URL}/boot`, { signal });
+export async function pingServer(signal) {
+  const res = await fetch(`${API_URL}/`, { signal });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
 }
 
 // POST /api/stream -> newline-delimited JSON; onEvent() is called as each line arrives.
