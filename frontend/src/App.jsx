@@ -20,7 +20,7 @@ export default function App() {
   const lineCount = runs.reduce((n, r) => n + r.lines.length, 0);
   useEffect(() => {
     if (runs.length) bottomRef.current?.scrollIntoView({ block: "end", behavior: "smooth" });
-  }, [lineCount, runs.length, busy]);
+  }, [lineCount, runs.length]);
 
   const ask = async ({ question, link }) => {
     const id = nextId.current++;

@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import LogLine from "./LogLine";
 import Markdown from "./Markdown";
 import { Caret, Prompt, Spinner } from "./Terminal";
@@ -10,6 +11,12 @@ const snippet = (s, n = 140) => {
 // One question: echoed command -> streamed log lines -> answer -> sources -> exit code.
 export default function RunBlock({ run }) {
   const { question, link, lines, status, answer, sources, error, duration } = run;
+  const answerRef = useRef(null);
+
+  // bring the answer to the top of the screen as soon as it arrives
+  useEffect(() => {
+    if (status === "done") answerRef.current?.scrollIntoView({ block: "start", behavior: "smooth" });
+  }, [status]);
 
   return (
     <section className="mt-10 border-t border-white/10 pt-8">
@@ -43,14 +50,19 @@ export default function RunBlock({ run }) {
 
       {status === "done" && (
         <>
-          <Prompt className="mt-8 border-b border-white/10 pb-3">cat answer.md</Prompt>
-          <div className="line-in">
-            <Markdown source={answer} />
+          <div
+            ref={answerRef}
+            className="line-in mt-8 scroll-mt-6 rounded-xl border border-gold/30 border-l-4 border-l-gold bg-gold/[0.07] p-5 shadow-[0_0_40px_-12px_rgba(193,154,91,0.35)] md:p-7"
+          >
+            <h2 className="font-warm-display text-[11px] tracking-[0.18em] text-gold uppercase">Answer</h2>
+            <div className="-mt-1 [&_p]:text-[14px] [&_p]:text-cream/90 [&_li]:text-[14px] [&_li]:text-cream/90">
+              <Markdown source={answer} />
+            </div>
           </div>
 
           {sources.length > 0 && (
             <>
-              <Prompt className="mt-8">cat sources</Prompt>
+              <h2 className="font-warm-display mt-10 text-[11px] tracking-[0.18em] text-white/50 uppercase">Source Links</h2>
               <ol className="mt-3 space-y-2">
                 {sources.map((s, i) => (
                   <li key={i} className="line-in text-[12.5px]">
