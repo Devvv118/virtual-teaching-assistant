@@ -140,7 +140,7 @@ async def daily_budget_exceeded() -> bool:
 
     except Exception as e:
         print(f"Error checking daily budget: {e}")
-        return True
+        return False
 
 def get_embedding(text: str) -> List:
     url = "https://aipipe.org/openai/v1/embeddings"
