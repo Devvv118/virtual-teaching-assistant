@@ -5,6 +5,8 @@ import { Prompt, TerminalWindow } from "./components/Terminal";
 import LogLine from "./components/LogLine";
 import AskForm from "./components/AskForm";
 import RunBlock from "./components/RunBlock";
+import Notices from "./components/Notices";
+import SampleQuestions from "./components/SampleQuestions";
 
 export default function App() {
   const { lines: bootLines, status, retry } = useBoot();
@@ -12,6 +14,7 @@ export default function App() {
   const ctrlRef = useRef(null);
   const bottomRef = useRef(null);
   const nextId = useRef(1);
+  const [queued, setQueued] = useState(null); // sample picked before the backend woke up
 
   const busy = runs.some((r) => r.status === "running");
   const patch = (id, fn) => setRuns((rs) => rs.map((r) => (r.id === id ? fn(r) : r)));
@@ -60,14 +63,33 @@ export default function App() {
     }
   };
 
+  // run a queued sample as soon as the backend is reachable
+  useEffect(() => {
+    if (queued && status === "ready" && !busy) {
+      const q = queued;
+      setQueued(null);
+      ask({ question: q, link: "" });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [queued, status, busy]);
+
   return (
-    <main className="min-h-screen bg-navy-deep font-mono text-cream">
+    <main className="min-h-screen page-bg font-mono text-cream">
       <TerminalWindow status={status}>
         <h1 className="font-warm-display text-2xl text-cream md:text-4xl">Virtual Teaching Assistant</h1>
         <p className="mt-3 max-w-xl text-sm leading-relaxed text-cream/70">
-          Ask a question about the the IITM TDS course of Jan 2025. The answer is retrieved from the course material and past Discourse threads
+          Ask a question about the IITM TDS course of Jan 2025. The answer is retrieved from the course material and past Discourse threads
           - and you can watch every step as it runs.
         </p>
+
+        <Notices status={status} />
+
+        <SampleQuestions
+          queued={queued}
+          waiting={status !== "ready"}
+          disabled={busy || status === "offline"}
+          onPick={(q) => (status === "ready" ? ask({ question: q, link: "" }) : setQueued(q))}
+        />
 
         <Prompt className="mt-10">python main.py</Prompt>
         <div className="mt-4 space-y-1">

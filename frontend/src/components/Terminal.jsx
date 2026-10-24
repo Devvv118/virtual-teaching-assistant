@@ -10,7 +10,7 @@ const STATUS = {
 export function TerminalWindow({ status, children }) {
   const s = STATUS[status];
   return (
-    <div className="mx-4 my-8 max-w-5xl overflow-hidden rounded-xl border border-white/10 bg-warm-ink shadow-2xl md:mx-auto md:my-12">
+    <div className="mx-4 my-8 max-w-5xl overflow-hidden rounded-xl border border-white/10 bg-warm-ink/90 shadow-[0_30px_80px_-20px_rgba(0,0,0,0.8),0_0_0_1px_rgba(193,154,91,0.08)] backdrop-blur md:mx-auto md:my-12">
       <div className="flex items-center gap-2 border-b border-white/10 bg-black/30 px-4 py-3">
         <span className="h-2.5 w-2.5 rounded-full bg-white/20" />
         <span className="h-2.5 w-2.5 rounded-full bg-white/20" />
