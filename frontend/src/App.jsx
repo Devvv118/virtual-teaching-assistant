@@ -65,7 +65,7 @@ export default function App() {
       <TerminalWindow status={status}>
         <h1 className="font-warm-display text-2xl text-cream md:text-4xl">Virtual Teaching Assistant</h1>
         <p className="mt-3 max-w-xl text-sm leading-relaxed text-cream/70">
-          Ask a question about the TDS course. The answer is retrieved from the course material and past Discourse threads
+          Ask a question about the the IITM TDS course of Jan 2025. The answer is retrieved from the course material and past Discourse threads
           - and you can watch every step as it runs.
         </p>
 
