@@ -3,7 +3,7 @@ import { SAMPLE_QUESTIONS } from "../lib/samples";
 // Click a sample to run it straight away (or queue it until the backend has woken up).
 export default function SampleQuestions({ onPick, disabled, waiting, queued }) {
   return (
-    <section className="mt-8">
+    <div className="mt-4">
       <p className="text-[11px] tracking-[0.14em] text-white/50 uppercase">Try a sample question</p>
       <div className="mt-3 flex flex-col gap-2">
         {SAMPLE_QUESTIONS.map((q) => {
@@ -28,6 +28,6 @@ export default function SampleQuestions({ onPick, disabled, waiting, queued }) {
       {waiting && !queued && (
         <p className="mt-2 text-[11px] text-white/35">Click one now - it will run automatically once the server is connected.</p>
       )}
-    </section>
+    </div>
   );
 }

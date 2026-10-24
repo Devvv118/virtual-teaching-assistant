@@ -6,7 +6,6 @@ import LogLine from "./components/LogLine";
 import AskForm from "./components/AskForm";
 import RunBlock from "./components/RunBlock";
 import Notices from "./components/Notices";
-import SampleQuestions from "./components/SampleQuestions";
 
 export default function App() {
   const { lines: bootLines, status, retry } = useBoot();
@@ -84,13 +83,6 @@ export default function App() {
 
         <Notices status={status} />
 
-        <SampleQuestions
-          queued={queued}
-          waiting={status !== "ready"}
-          disabled={busy || status === "offline"}
-          onPick={(q) => (status === "ready" ? ask({ question: q, link: "" }) : setQueued(q))}
-        />
-
         <Prompt className="mt-10">python main.py</Prompt>
         <div className="mt-4 space-y-1">
           {bootLines.map((l, i) => (
@@ -107,14 +99,15 @@ export default function App() {
           <RunBlock key={r.id} run={r} />
         ))}
 
-        {(status === "ready" || runs.length > 0) && (
-          <AskForm
-            disabled={status !== "ready"}
-            busy={busy}
-            onSubmit={ask}
-            onInterrupt={() => ctrlRef.current?.abort()}
-          />
-        )}
+        <AskForm
+          disabled={status !== "ready"}
+          offline={status === "offline"}
+          busy={busy}
+          queued={queued}
+          onSubmit={ask}
+          onPick={(q) => (status === "ready" ? ask({ question: q, link: "" }) : setQueued(q))}
+          onInterrupt={() => ctrlRef.current?.abort()}
+        />
 
         {runs.length > 0 && !busy && (
           <button

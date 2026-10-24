@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { isSupportedLink } from "../lib/api";
 import { Prompt } from "./Terminal";
+import SampleQuestions from "./SampleQuestions";
 
 const MAX_QUESTION = 20_000;
 
-export default function AskForm({ disabled, busy, onSubmit, onInterrupt }) {
+export default function AskForm({ disabled, offline, busy, queued, onSubmit, onPick, onInterrupt }) {
   const [question, setQuestion] = useState("");
   const [link, setLink] = useState("");
   const taRef = useRef(null);
@@ -44,7 +45,9 @@ export default function AskForm({ disabled, busy, onSubmit, onInterrupt }) {
     <section className="mt-10">
       <Prompt>ask</Prompt>
 
-      <label className="mt-3 flex items-start gap-3 text-[13px]">
+      <SampleQuestions onPick={onPick} queued={queued} waiting={disabled && !offline} disabled={busy || offline} />
+
+      <label className="mt-6 flex items-start gap-3 text-[13px]">
         <span className="w-[5.5rem] shrink-0 pt-[3px] text-gold-soft">question</span>
         <span className="pt-[3px] text-gold">▸</span>
         <textarea
